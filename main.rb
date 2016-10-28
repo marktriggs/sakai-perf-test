@@ -78,14 +78,18 @@ class StatsCollector
 
     step = 50
     max_bucket = (max_time / step.to_f).ceil * step
-    (0...max_bucket).step(step).each do |lower_bound|
-      reading_count = stats.count {|stat| stat.duration >= lower_bound && stat.duration < (lower_bound + step)}
+    buckets = [0, 50, 100, 150, 200, 300, 400, 500, 1000] + (2000..max_bucket).to_a
+
+    buckets.zip(buckets.drop(1)).each do |lower, upper|
+      reading_count = stats.count {|stat| stat.duration >= lower && stat.duration < upper}
       percent = sprintf('%.2f', (reading_count / tool_count.to_f) * 100)
 
       $stderr.puts(sprintf('    %4dms - %-4dms: %s%%',
-                           lower_bound,
-                           (lower_bound + step) - 1,
+                           lower,
+                           upper - 1,
                            percent))
+
+      break if !upper || upper > max_time
     end
 
 

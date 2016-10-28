@@ -14,6 +14,7 @@ require_relative 'lib/jetty-http-9.4.0.M1.jar'
 require_relative 'lib/jetty-io-9.4.0.M1.jar'
 require_relative 'lib/jetty-client-9.4.0.M1.jar'
 
+# Give our testers unique names
 NAMES = %w(Aaliyah Aaron Abigail Adam Addison Adrian Aiden Alexa Alexander
            Alexis Alice Allison Alyssa Amelia Andrew Angel Anna Annabelle
            Anthony Aria Ariana Arianna Asher Ashley Aubree Aubrey Audrey Aurora
@@ -66,6 +67,8 @@ class StatsCollector
   end
 
   def self.summarize_stats(stats)
+    return if stats.empty?
+
     tool_count = stats.length
     min_time = stats.min_by {|stat| stat.duration}.duration
     max_time = stats.max_by {|stat| stat.duration}.duration
@@ -78,10 +81,15 @@ class StatsCollector
 
     step = 50
     max_bucket = (max_time / step.to_f).ceil * step
-    buckets = [0, 50, 100, 150, 200, 300, 400, 500, 1000] + (2000..max_bucket).to_a
+    buckets = [0, 50, 100, 150, 200, 300, 400, 500, 1000] + (2000..max_bucket).step(1000).to_a
 
     buckets.zip(buckets.drop(1)).each do |lower, upper|
+      break unless upper
+
       reading_count = stats.count {|stat| stat.duration >= lower && stat.duration < upper}
+
+      next unless reading_count > 0
+
       percent = sprintf('%.2f', (reading_count / tool_count.to_f) * 100)
 
       $stderr.puts(sprintf('    %4dms - %-4dms: %s%%',
@@ -101,7 +109,7 @@ end
 class SimulatedUser
 
   # Each user will select this many tools
-  TOOLS_TO_HIT = 20
+  TOOLS_TO_HIT = 50
 
   attr_reader :http, :base_url
 
@@ -124,10 +132,14 @@ class SimulatedUser
 
   private
 
-  UUID_REGEX = /[a-f0-9]+-[a-f0-9]+-[a-f0-9]+-[a-f0-9]+-[a-f0-9]+/
+  UUID_REGEX = /[a-f0-9]+-[a-f0-9]+-[a-f0-9]+-[a-f0-9]+-[a-f0-9]+|[a-f0-9]{32}/
   SITES_REGEX = %r{/portal/site/(#{UUID_REGEX})" title="(.*?)"}
-  TOOL_REGEX = %r{(/portal/site/#{UUID_REGEX}/tool/#{UUID_REGEX})" title="(.*?)"}
-  WORKSPACE_REGEX = %r{(/portal/site/%7E.*?)" title="Home"}
+
+  # Sakai 10.7 uses page; 11 uses tool
+  TOOL_REGEX = %r{(/portal/site/#{UUID_REGEX}/(?:tool|page)/#{UUID_REGEX})" title="(.*?)"}
+  IFRAME_TOOL_REGEX = %r{src=.*(/portal/tool/#{UUID_REGEX}.*?)"}
+  WORKSPACE_REGEX = %r{(/portal/site/%7E.*?)" title="(Home|My Workspace)"}
+
 
   def log(s)
     $stderr.write("#{(Time.now.to_f * 1000).to_i} #{sprintf('%-40s', @my_id)} #{s}\n")
@@ -154,16 +166,32 @@ class SimulatedUser
   def select_random_tools(last_response, site_id, site_title, tools_to_hit)
     tools = last_response.content.scan(TOOL_REGEX).compact.uniq
 
+    # Skip these for now because they're outliers
+    tools = tools.reject {|t| t[1] =~ /Gradebook|NYU Libraries/}
+
     if tools.empty?
+      $stderr.puts(last_response.content)
       return fail_user("No tools for #{site_id}")
     end
 
     (tool_url, tool_title) = tools.sample
 
-    http.get(uri(tool_url)) do |response|
-      log(":response_ms=#{sprintf('%-6s', response.duration)} :status=#{response.status} :site_id=#{site_id} :site_title=#{sprintf('%-30.30s', site_title)} :tool_title=#{sprintf('%-30.30s', tool_title)}")
+    outer_response = nil
 
-      StatsCollector.tool_stat(tool_title, response.duration, response.error?)
+    if tool_url =~ /\/page\//
+      # If we're in Sakai 10 land, we've actually just got the outer page.  Need
+      # to fetch the inner iframe for the tool
+      http.get(uri(tool_url)) do |response|
+        outer_response = response
+        tool_url = response.content.scan(IFRAME_TOOL_REGEX).flatten.compact.first
+      end
+    end
+
+    http.get(uri(tool_url)) do |response|
+      aggr_duration = response.duration + (outer_response ? outer_response.duration : 0)
+      log(":response_ms=#{sprintf('%-6s', aggr_duration)} :status=#{response.status} :site_id=#{site_id} :site_title=#{sprintf('%-30.30s', site_title)} :tool_title=#{sprintf('%-30.30s', tool_title)}")
+
+      StatsCollector.tool_stat(tool_title, aggr_duration, response.error?)
 
       if tools_to_hit == 0
         return_to_workspace(response)

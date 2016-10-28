@@ -1,0 +1,7 @@
+#!/bin/bash
+
+base="`dirname "$0"`"
+
+jruby="`ls $base/jruby-complete*.jar | sort -r | head -1`"
+
+exec java $JAVA_OPTS -Dfile.encoding=UTF-8 -cp "$jruby" org.jruby.Main ${1+"$@"}

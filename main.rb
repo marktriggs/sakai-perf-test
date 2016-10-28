@@ -38,10 +38,66 @@ NAMES = %w(Aaliyah Aaron Abigail Adam Addison Adrian Aiden Alexa Alexander
 
 java_import org.eclipse.jetty.client.HttpClient
 
+class StatsCollector
+
+  @stats = java.util.Collections.synchronizedList(java.util.ArrayList.new)
+
+  def self.tool_stat(tool_name, duration, was_error)
+    @stats << Stat.new(tool_name, duration, was_error)
+  end
+
+  def self.dump_stats
+    $stderr.puts("=" * 71)
+    $stderr.puts("\nStats by tool:\n\n")
+    stats_by_tool = @stats.group_by {|stat| stat.tool_name}
+
+    stats_by_tool.keys.sort.each do |tool_name|
+      $stderr.puts(tool_name)
+      $stderr.puts('-' * tool_name.length)
+      summarize_stats(stats_by_tool[tool_name])
+      $stderr.puts("")
+    end
+
+    $stderr.puts("\nStats for entire run:\n\n")
+    summarize_stats(@stats)
+
+    $stderr.puts("")
+    $stderr.puts("=" * 71)
+  end
+
+  def self.summarize_stats(stats)
+    tool_count = stats.length
+    min_time = stats.min_by {|stat| stat.duration}.duration
+    max_time = stats.max_by {|stat| stat.duration}.duration
+    error_count = stats.count {|stat| stat.was_error}
+
+    $stderr.puts("  Request count: #{tool_count}")
+    $stderr.puts("  Best time: #{min_time}")
+    $stderr.puts("  Worst time: #{max_time}")
+    $stderr.puts("  Error count: #{error_count}")
+
+    step = 50
+    max_bucket = (max_time / step.to_f).ceil * step
+    (0...max_bucket).step(step).each do |lower_bound|
+      reading_count = stats.count {|stat| stat.duration >= lower_bound && stat.duration < (lower_bound + step)}
+      percent = sprintf('%.2f', (reading_count / tool_count.to_f) * 100)
+
+      $stderr.puts(sprintf('    %4dms - %-4dms: %s%%',
+                           lower_bound,
+                           (lower_bound + step) - 1,
+                           percent))
+    end
+
+
+  end
+
+  Stat = Struct.new(:tool_name, :duration, :was_error)
+end
+
 class SimulatedUser
 
   # Each user will select this many tools
-  TOOLS_TO_HIT = 10
+  TOOLS_TO_HIT = 20
 
   attr_reader :http, :base_url
 
@@ -87,7 +143,7 @@ class SimulatedUser
     return fail_user("No site id found") unless site_id
 
     http.get(uri("/portal/site/#{site_id}")) do |response|
-      select_random_tools(response, site_id, site_title, TOOLS_TO_HIT)
+      select_random_tools(response, site_id, site_title, TOOLS_TO_HIT - 1)
     end
   end
 
@@ -102,6 +158,8 @@ class SimulatedUser
 
     http.get(uri(tool_url)) do |response|
       log(":response_ms=#{sprintf('%-6s', response.duration)} :status=#{response.status} :site_id=#{site_id} :site_title=#{sprintf('%-30.30s', site_title)} :tool_title=#{sprintf('%-30.30s', tool_title)}")
+
+      StatsCollector.tool_stat(tool_title, response.duration, response.error?)
 
       if tools_to_hit == 0
         return_to_workspace(response)
@@ -282,6 +340,8 @@ class Main
     end
 
     clients.each(&:wait)
+
+    StatsCollector.dump_stats
   end
 end
 

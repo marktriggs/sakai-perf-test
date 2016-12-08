@@ -225,7 +225,7 @@ class AsyncHttpClient
   attr_reader :http
 
   def initialize
-    @http = HttpClient.new
+    @http = HttpClient.new(org.eclipse.jetty.util.ssl.SslContextFactory.new)
     @http.start
 
     # Sci-fi!
